@@ -147,7 +147,7 @@ class PlannerSkeleton:
         self.target_row_idx = row_idx
 
         # 차선은 목표 슬롯과 가장 가까운 후보를 선택하되,
-        # 상단(위쪽) 접근이 필요한前/中단行时优先使用上方车道
+        # 상단(위쪽) 접근이 필요한 전/중단 행은 위쪽 차선을 우선 사용
         if self.lane_candidates:
             lane_y = min(self.lane_candidates, key=lambda ly: abs(ly - slot_cy))
             if row_idx is not None and row_idx <= 1:
@@ -158,7 +158,6 @@ class PlannerSkeleton:
             lane_y = self.lane_y
         self.lane_y = lane_y
 
-        # 车位最终停在的 x
         parking_x = slot_cx
         parking_x = max(xmin + 0.5, min(xmax - 0.5, parking_x))
 
@@ -176,58 +175,30 @@ class PlannerSkeleton:
         if lane_y is not None and abs(y - lane_y) > 0.4:
             self.waypoints.append((x, lane_y))
 
-        # ---------- 关键改动：前两列减少提前拐弯距离 ----------
+        # Step 2: 在车位前侧更早开始拐，且避免靠墙
         slot_width = xmax - xmin
-
-        # 先计算该行内的列号
-        col_idx = None
-        slots = self.map_data.get("slots") or []
-        row_centers_x: List[float] = []
-        for s in slots:
-            sxmin, sxmax, symin, symax = self._slot_rect_from_obj(s)
-            scx = (sxmin + sxmax) * 0.5
-            scy = (symin + symax) * 0.5
-            if abs(scy - slot_cy) < 0.3:
-                row_centers_x.append(scx)
-
-        if row_centers_x:
-            row_centers_x.sort()
-            col_idx = min(
-                range(len(row_centers_x)),
-                key=lambda i: abs(row_centers_x[i] - slot_cx),
-            )
-
-        # 默认的提前拐弯距离
         turn_offset = min(max(5.5, slot_width * 1.4), 8.0)
-
-        # 如果是本行前两列：把拐弯点往右挪一些（减少 offset）
-        if col_idx is not None and col_idx <= 1:
-            turn_offset = min(max(3.8, slot_width * 1.2), 6.0)
-
         desired_turn_x = slot_cx - turn_offset
         approach_x = desired_turn_x
-
-        # 保证在车位前有直线距离
         approach_x = min(approach_x, parking_x - 1.2)
-
-        # 避免太贴左右墙
         approach_x = max(xmin_map + 2.0, min(approach_x, xmax_map - 2.0))
 
-        # 进入车位前，在行车道侧做一点 y 方向偏置
+        # 进入车位前，先在靠近行车道一侧的 y 做小幅偏置，提高各排进入精度
         approach_side = 1.0 if lane_y is not None and lane_y > slot_cy else -1.0
         entry_y = slot_cy + approach_side * min(0.55, slot_width * 0.15 + 0.25)
 
-        # Step 2~4: 拐弯进入车位前侧
         self.waypoints.append((approach_x, lane_y))
         self.waypoints.append((approach_x, entry_y))
+
+        # Step 3: 往车位中心 y 拐入
         self.waypoints.append((approach_x, slot_cy))
 
-        # Step 4.5: 第一/第二排额外的入库预对齐点
+        # Step 3.5: 第一/第二排额外的入库预对齐点（不影响第三排）
         if row_idx is not None and row_idx <= 1:
             pre_entry_x = max(xmin + 0.7, min(xmax - 0.7, slot_cx - 0.5))
             self.waypoints.append((pre_entry_x, slot_cy))
 
-        # Step 5: 直线驶入车位终点
+        # Step 4: 直线驶入车位终点
         self.waypoints.append((parking_x, slot_cy))
 
         self.planned = True
@@ -263,7 +234,8 @@ class PlannerSkeleton:
         cmd = {"steer": 0.0, "accel": 0.0, "brake": 0.0, "gear": "D"}
 
         # ==========================================================
-        # 停车逻辑：只看“离车位最近的那个后角”，并给车位边界留 0.3m 容差
+        # ★ 停车逻辑：只看“离车位最近的那个后角”，并给车位边界留 0.3m 容差
+        #   (x, y) 视为车尾中心
         # ==========================================================
         car_width = 2.0
         half_W = car_width * 0.5
